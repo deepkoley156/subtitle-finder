@@ -67,6 +67,10 @@
       background: #e5e7eb;
       color: #111827;
     }
+    button.copyBtn {
+      background: #111827;
+      color: white;
+    }
     button:disabled {
       opacity: .65;
       cursor: not-allowed;
@@ -84,6 +88,7 @@
       margin-top: 14px;
       font-size: 14px;
       color: #374151;
+      line-height: 1.7;
     }
     .list {
       display: grid;
@@ -145,6 +150,12 @@
       color: #6b7280;
       padding: 12px 2px;
     }
+    .footerNote {
+      margin-top: 14px;
+      font-size: 13px;
+      color: #6b7280;
+      line-height: 1.6;
+    }
   </style>
 </head>
 <body>
@@ -167,11 +178,15 @@
 
       <div class="actions">
         <button id="findBtn">Find Subtitles</button>
-        <button id="clearBtn" class="secondary">Clear</button>
+        <button id="clearBtn" class="secondary" type="button">Clear</button>
       </div>
 
       <div id="status" class="status"></div>
       <div id="summary" class="summary"></div>
+
+      <div class="footerNote">
+        Tip: direct <b>.vtt</b> link dile sibling language subtitle scan korte beshi useful hoy.
+      </div>
     </div>
 
     <div id="results" class="list"></div>
@@ -207,24 +222,51 @@
       try {
         await navigator.clipboard.writeText(text);
         alert("Copied");
-      } catch {
+      } catch (err) {
         alert("Copy failed");
       }
     }
 
-    function renderItems(items, debug) {
+    function buildSummary(debug, count, inputUrl) {
+      const htmlLine = `<div><b>HTML scan:</b> ${debug.htmlScan ? "Yes" : "No"}${debug.htmlReason ? " (" + escapeHtml(debug.htmlReason) + ")" : ""}</div>`;
+      const networkLine = `<div><b>Network scan:</b> ${debug.networkScan ? "Yes" : "No"}${debug.networkReason ? " (" + escapeHtml(debug.networkReason) + ")" : ""}</div>`;
+      const probeLine = `<div><b>Sibling language probe:</b> ${debug.subtitleProbe ? "Yes" : "No"}</div>`;
+      const countLine = `<div><b>Found:</b> ${count}</div>`;
+      const inputLine = `<div><b>Input:</b> ${escapeHtml(inputUrl || "")}</div>`;
+
+      return `${countLine}${inputLine}${htmlLine}${networkLine}${probeLine}`;
+    }
+
+    function renderItems(items, debug, inputUrl) {
       resultsBox.innerHTML = "";
       emptyBox.textContent = "";
 
       if (!items || !items.length) {
+        summaryBox.innerHTML = buildSummary(debug || {
+          htmlScan: false,
+          htmlReason: "",
+          networkScan: false,
+          networkReason: "",
+          subtitleProbe: false
+        }, 0, inputUrl || "");
         emptyBox.textContent =
           "Kono subtitle link paowa jai ni. Page ta tokenized / DRM / login protected hote pare.";
         return;
       }
 
+      summaryBox.innerHTML = buildSummary(debug || {
+        htmlScan: false,
+        htmlReason: "",
+        networkScan: false,
+        networkReason: "",
+        subtitleProbe: false
+      }, items.length, inputUrl || "");
+
       items.forEach((item, index) => {
         const div = document.createElement("div");
         div.className = "item";
+
+        const safeUrlForJs = JSON.stringify(item.url);
 
         div.innerHTML = `
           <div class="titleRow">
@@ -244,26 +286,29 @@
           ${item.note ? `<div class="muted" style="margin-top:10px;">${escapeHtml(item.note)}</div>` : ""}
 
           <div class="itemActions">
-            <a class="linkBtn" href="${item.url}" target="_blank" rel="noopener noreferrer">Open</a>
-            <a class="linkBtn" href="${item.url}" download>Download</a>
-            <button onclick="copyText('${item.url.replace(/'/g, "\\'")}')">Copy Link</button>
+            <a class="linkBtn" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">Open</a>
+            <a class="linkBtn" href="${escapeHtml(item.url)}" download>Download</a>
+            <button class="copyBtn" type="button" data-url=${safeUrlForJs}>Copy Link</button>
           </div>
         `;
 
         resultsBox.appendChild(div);
       });
 
-      if (debug) {
-        summaryBox.innerHTML = `
-          <div><b>Found:</b> ${items.length}</div>
-          <div><b>HTML scan:</b> ${debug.htmlScan ? "Yes" : "No"}</div>
-          <div><b>Network scan:</b> ${debug.networkScan ? "Yes" : "No"}${debug.networkReason ? " (" + escapeHtml(debug.networkReason) + ")" : ""}</div>
-          <div><b>Sibling language probe:</b> ${debug.subtitleProbe ? "Yes" : "No"}</div>
-        `;
-      }
+      document.querySelectorAll(".copyBtn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const text = btn.getAttribute("data-url");
+          try {
+            const parsed = JSON.parse(text);
+            await copyText(parsed);
+          } catch {
+            await copyText(text);
+          }
+        });
+      });
     }
 
-    findBtn.addEventListener("click", async () => {
+    async function findSubtitles() {
       const url = urlInput.value.trim();
       const mode = modeSelect.value;
 
@@ -292,11 +337,22 @@
         }
 
         setStatus(`Done. ${data.count} ta result paowa geche.`);
-        renderItems(data.subtitles || [], data.debug || null);
+        renderItems(data.subtitles || [], data.debug || null, data.inputUrl || url);
       } catch (err) {
         setStatus("Error: " + err.message);
+        summaryBox.textContent = "";
+        resultsBox.innerHTML = "";
+        emptyBox.textContent = "";
       } finally {
         findBtn.disabled = false;
+      }
+    }
+
+    findBtn.addEventListener("click", findSubtitles);
+
+    urlInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        findSubtitles();
       }
     });
 
@@ -308,8 +364,6 @@
       summaryBox.textContent = "";
       setStatus("", false);
     });
-
-    window.copyText = copyText;
   </script>
 </body>
 </html>
