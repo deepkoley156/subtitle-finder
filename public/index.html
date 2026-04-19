@@ -1,1 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Subtitle Finder</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f5f7fb;
+      color: #111827;
+    }
+    .wrap {
+      max-width: 1050px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 12px 30px rgba(0,0,0,.06);
+      margin-bottom: 20px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 28px;
+    }
+    p {
+      color: #4b5563;
+      line-height: 1.6;
+      margin: 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      margin-top: 18px;
+    }
+    input, select {
+      width: 100%;
+      padding: 14px 15px;
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      font-size: 15px;
+      outline: none;
+      background: #fff;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    button {
+      border: none;
+      background: #111827;
+      color: white;
+      padding: 13px 16px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 15px;
+    }
+    button.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    button:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      display: none;
+      white-space: pre-wrap;
+    }
+    .summary {
+      margin-top: 14px;
+      font-size: 14px;
+      color: #374151;
+    }
+    .list {
+      display: grid;
+      gap: 14px;
+    }
+    .item {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 8px 18px rgba(0,0,0,.03);
+    }
+    .titleRow {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .url {
+      margin-top: 8px;
+      word-break: break-all;
+      font-size: 14px;
+      color: #374151;
+    }
+    .chips {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: #374151;
+    }
+    .itemActions {
+      margin-top: 14px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .linkBtn {
+      display: inline-block;
+      text-decoration: none;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: #f3f4f6;
+      color: #111827;
+    }
+    .muted {
+      color: #6b7280;
+      font-size: 13px;
+    }
+    .empty {
+      color: #6b7280;
+      padding: 12px 2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Subtitle Finder</h1>
+      <p>
+        Page URL paste korun, tool subtitle link khujbe. Chaile direct subtitle URL-o dite paren,
+        tahole same pattern theke other language subtitle probe korbe.
+      </p>
 
+      <div class="grid">
+        <input id="urlInput" type="text" placeholder="Paste page URL or direct .vtt link" />
+        <select id="modeSelect">
+          <option value="auto">Auto Detect</option>
+          <option value="page">Page URL Scan</option>
+          <option value="subtitle">Direct Subtitle URL Scan</option>
+        </select>
+      </div>
+
+      <div class="actions">
+        <button id="findBtn">Find Subtitles</button>
+        <button id="clearBtn" class="secondary">Clear</button>
+      </div>
+
+      <div id="status" class="status"></div>
+      <div id="summary" class="summary"></div>
+    </div>
+
+    <div id="results" class="list"></div>
+    <div id="empty" class="empty"></div>
+  </div>
+
+  <script>
+    const urlInput = document.getElementById("urlInput");
+    const modeSelect = document.getElementById("modeSelect");
+    const findBtn = document.getElementById("findBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const statusBox = document.getElementById("status");
+    const summaryBox = document.getElementById("summary");
+    const resultsBox = document.getElementById("results");
+    const emptyBox = document.getElementById("empty");
+
+    function setStatus(message, show = true) {
+      statusBox.style.display = show ? "block" : "none";
+      statusBox.textContent = message;
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, s => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[s]);
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        alert("Copied");
+      } catch {
+        alert("Copy failed");
+      }
+    }
+
+    function renderItems(items, debug) {
+      resultsBox.innerHTML = "";
+      emptyBox.textContent = "";
+
+      if (!items || !items.length) {
+        emptyBox.textContent =
+          "Kono subtitle link paowa jai ni. Page ta tokenized / DRM / login protected hote pare.";
+        return;
+      }
+
+      items.forEach((item, index) => {
+        const div = document.createElement("div");
+        div.className = "item";
+
+        div.innerHTML = `
+          <div class="titleRow">
+            <div>
+              <strong>Subtitle ${index + 1}</strong>
+              <div class="url">${escapeHtml(item.url)}</div>
+            </div>
+          </div>
+
+          <div class="chips">
+            <span class="chip">Type: ${escapeHtml(item.type || "unknown")}</span>
+            <span class="chip">Lang: ${escapeHtml(item.lang || "unknown")}</span>
+            <span class="chip">Label: ${escapeHtml(item.label || "Unknown")}</span>
+            <span class="chip">Source: ${escapeHtml(item.source || "scan")}</span>
+          </div>
+
+          ${item.note ? `<div class="muted" style="margin-top:10px;">${escapeHtml(item.note)}</div>` : ""}
+
+          <div class="itemActions">
+            <a class="linkBtn" href="${item.url}" target="_blank" rel="noopener noreferrer">Open</a>
+            <a class="linkBtn" href="${item.url}" download>Download</a>
+            <button onclick="copyText('${item.url.replace(/'/g, "\\'")}')">Copy Link</button>
+          </div>
+        `;
+
+        resultsBox.appendChild(div);
+      });
+
+      if (debug) {
+        summaryBox.innerHTML = `
+          <div><b>Found:</b> ${items.length}</div>
+          <div><b>HTML scan:</b> ${debug.htmlScan ? "Yes" : "No"}</div>
+          <div><b>Network scan:</b> ${debug.networkScan ? "Yes" : "No"}${debug.networkReason ? " (" + escapeHtml(debug.networkReason) + ")" : ""}</div>
+          <div><b>Sibling language probe:</b> ${debug.subtitleProbe ? "Yes" : "No"}</div>
+        `;
+      }
+    }
+
+    findBtn.addEventListener("click", async () => {
+      const url = urlInput.value.trim();
+      const mode = modeSelect.value;
+
+      if (!url) {
+        setStatus("Age ekta URL din.");
+        return;
+      }
+
+      findBtn.disabled = true;
+      setStatus("Searching...");
+      summaryBox.textContent = "";
+      resultsBox.innerHTML = "";
+      emptyBox.textContent = "";
+
+      try {
+        const res = await fetch("/api/find-subtitles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, mode })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || "Request failed");
+        }
+
+        setStatus(`Done. ${data.count} ta result paowa geche.`);
+        renderItems(data.subtitles || [], data.debug || null);
+      } catch (err) {
+        setStatus("Error: " + err.message);
+      } finally {
+        findBtn.disabled = false;
+      }
+    });
+
+    clearBtn.addEventListener("click", () => {
+      urlInput.value = "";
+      modeSelect.value = "auto";
+      resultsBox.innerHTML = "";
+      emptyBox.textContent = "";
+      summaryBox.textContent = "";
+      setStatus("", false);
+    });
+
+    window.copyText = copyText;
+  </script>
+</body>
+</html>
