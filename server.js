@@ -178,11 +178,13 @@ function extractLinksFromText(text, baseUrl, sourceName = "text-scan") {
   return results;
 }
 
-async function fetchText(url) {
+async function fetchText(url, headers = {}) {
   const response = await fetch(url, {
     headers: {
       "User-Agent": USER_AGENT,
-      "Accept": "*/*"
+      "Accept": "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      ...headers
     },
     redirect: "follow"
   });
@@ -197,9 +199,10 @@ async function fetchText(url) {
 async function parseManifestForSubtitles(manifestUrl) {
   const results = [];
   try {
-    const text = await fetchText(manifestUrl);
+    const text = await fetchText(manifestUrl, {
+      "Referer": manifestUrl
+    });
 
-    // HLS
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -233,7 +236,6 @@ async function parseManifestForSubtitles(manifestUrl) {
       }
     }
 
-    // DASH rough scan
     const dashResults = extractLinksFromText(text, manifestUrl, "manifest-dash-scan");
     results.push(...dashResults);
 
@@ -244,60 +246,75 @@ async function parseManifestForSubtitles(manifestUrl) {
 }
 
 async function htmlAndScriptScan(pageUrl) {
-  const html = await fetchText(pageUrl);
-  const $ = cheerio.load(html);
-  const results = [];
-
-  $("track").each((_, el) => {
-    const src = $(el).attr("src");
-    if (!src) return;
-
-    const resolved = normalizeUrl(pageUrl, src);
-    if (!resolved) return;
-
-    pushResult(results, resolved, {
-      source: "track-tag",
-      kind: $(el).attr("kind") || "subtitles",
-      lang: $(el).attr("srclang") || undefined,
-      label: $(el).attr("label") || undefined
+  try {
+    const html = await fetchText(pageUrl, {
+      "Referer": pageUrl
     });
-  });
 
-  $("source, link, meta").each((_, el) => {
-    for (const attr of ["src", "href", "content"]) {
-      const val = $(el).attr(attr);
-      if (!val) continue;
+    const $ = cheerio.load(html);
+    const results = [];
 
-      const resolved = normalizeUrl(pageUrl, val);
-      if (!resolved) continue;
+    $("track").each((_, el) => {
+      const src = $(el).attr("src");
+      if (!src) return;
 
-      if (maybeSubtitleOrManifest(resolved)) {
-        pushResult(results, resolved, {
-          source: `${el.tagName || "tag"}:${attr}`
-        });
+      const resolved = normalizeUrl(pageUrl, src);
+      if (!resolved) return;
+
+      pushResult(results, resolved, {
+        source: "track-tag",
+        kind: $(el).attr("kind") || "subtitles",
+        lang: $(el).attr("srclang") || undefined,
+        label: $(el).attr("label") || undefined
+      });
+    });
+
+    $("source, link, meta").each((_, el) => {
+      for (const attr of ["src", "href", "content"]) {
+        const val = $(el).attr(attr);
+        if (!val) continue;
+
+        const resolved = normalizeUrl(pageUrl, val);
+        if (!resolved) continue;
+
+        if (maybeSubtitleOrManifest(resolved)) {
+          pushResult(results, resolved, {
+            source: `${el.tagName || "tag"}:${attr}`
+          });
+        }
+      }
+    });
+
+    results.push(...extractLinksFromText(html, pageUrl, "html-scan"));
+
+    $("script").each((_, el) => {
+      const scriptText = $(el).html() || "";
+      results.push(...extractLinksFromText(scriptText, pageUrl, "script-scan"));
+    });
+
+    const unique = uniqueByUrl(results);
+    const expanded = [];
+
+    for (const item of unique) {
+      expanded.push(item);
+      if (manifestLike(item.url)) {
+        const manifestSubs = await parseManifestForSubtitles(item.url);
+        expanded.push(...manifestSubs);
       }
     }
-  });
 
-  results.push(...extractLinksFromText(html, pageUrl, "html-scan"));
-
-  $("script").each((_, el) => {
-    const scriptText = $(el).html() || "";
-    results.push(...extractLinksFromText(scriptText, pageUrl, "script-scan"));
-  });
-
-  const unique = uniqueByUrl(results);
-  const expanded = [];
-
-  for (const item of unique) {
-    expanded.push(item);
-    if (manifestLike(item.url)) {
-      const manifestSubs = await parseManifestForSubtitles(item.url);
-      expanded.push(...manifestSubs);
-    }
+    return {
+      ok: true,
+      reason: "",
+      results: uniqueByUrl(expanded)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error.message || "HTML scan failed",
+      results: []
+    };
   }
-
-  return uniqueByUrl(expanded);
 }
 
 async function playwrightNetworkScan(pageUrl) {
@@ -322,10 +339,19 @@ async function playwrightNetworkScan(pageUrl) {
     });
 
     const context = await browser.newContext({
-      userAgent: USER_AGENT
+      userAgent: USER_AGENT,
+      locale: "en-US",
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9"
+      }
     });
 
     const page = await context.newPage();
+
+    await page.setExtraHTTPHeaders({
+      "accept-language": "en-US,en;q=0.9",
+      "referer": pageUrl
+    });
 
     const maybePush = (rawUrl, source, extra = {}) => {
       if (!rawUrl) return;
@@ -339,66 +365,88 @@ async function playwrightNetworkScan(pageUrl) {
     });
 
     page.on("response", async res => {
-      const url = res.url();
-      const headers = res.headers();
-      const ctype = (headers["content-type"] || "").toLowerCase();
+      try {
+        const url = res.url();
+        const headers = res.headers();
+        const ctype = (headers["content-type"] || "").toLowerCase();
 
-      if (
-        maybeSubtitleOrManifest(url) ||
-        ctype.includes("text/vtt") ||
-        ctype.includes("application/x-subrip") ||
-        ctype.includes("application/vnd.apple.mpegurl") ||
-        ctype.includes("application/dash+xml") ||
-        ctype.includes("application/octet-stream")
-      ) {
-        maybePush(url, "pw-response", { note: `HTTP ${res.status()}` });
+        if (
+          maybeSubtitleOrManifest(url) ||
+          ctype.includes("text/vtt") ||
+          ctype.includes("application/x-subrip") ||
+          ctype.includes("application/vnd.apple.mpegurl") ||
+          ctype.includes("application/dash+xml") ||
+          ctype.includes("application/octet-stream")
+        ) {
+          maybePush(url, "pw-response", { note: `HTTP ${res.status()}` });
 
-        if (manifestLike(url)) {
-          try {
-            const text = await res.text();
-            const extra = extractLinksFromText(text, url, "pw-manifest-text");
-            results.push(...extra);
+          if (manifestLike(url)) {
+            try {
+              const text = await res.text();
+              const extra = extractLinksFromText(text, url, "pw-manifest-text");
+              results.push(...extra);
 
-            const manifestSubs = await parseManifestForSubtitles(url);
-            results.push(...manifestSubs);
-          } catch {}
+              const manifestSubs = await parseManifestForSubtitles(url);
+              results.push(...manifestSubs);
+            } catch {}
+          }
+
+          if (!maybeSubtitleOrManifest(url) && ctype.includes("text/vtt")) {
+            pushResult(results, url, {
+              source: "pw-content-type",
+              type: "vtt"
+            });
+          }
         }
-
-        if (!maybeSubtitleOrManifest(url) && ctype.includes("text/vtt")) {
-          pushResult(results, url, {
-            source: "pw-content-type",
-            type: "vtt"
-          });
-        }
-      }
+      } catch {}
     });
 
     await page.goto(pageUrl, {
-      waitUntil: "domcontentloaded",
+      waitUntil: "networkidle",
       timeout: 45000
     });
 
     await page.waitForTimeout(6000);
 
     try {
-      const buttons = await page.locator("button, [role='button']").all();
-      for (const btn of buttons.slice(0, 20)) {
-        try {
-          const txt = ((await btn.textContent()) || "").toLowerCase();
-          if (
-            txt.includes("cc") ||
-            txt.includes("sub") ||
-            txt.includes("caption") ||
-            txt.includes("subtitle")
-          ) {
-            await btn.click({ timeout: 1500 });
-            await page.waitForTimeout(1200);
-          }
-        } catch {}
+      const selectors = [
+        "button",
+        "[role='button']",
+        ".cc",
+        ".captions",
+        ".subtitle",
+        ".subtitles"
+      ];
+
+      for (const selector of selectors) {
+        const elements = await page.locator(selector).all();
+        for (const el of elements.slice(0, 20)) {
+          try {
+            const txt = ((await el.textContent()) || "").toLowerCase();
+            const aria = ((await el.getAttribute("aria-label")) || "").toLowerCase();
+            const title = ((await el.getAttribute("title")) || "").toLowerCase();
+            const combined = `${txt} ${aria} ${title}`;
+
+            if (
+              combined.includes("cc") ||
+              combined.includes("sub") ||
+              combined.includes("caption") ||
+              combined.includes("subtitle")
+            ) {
+              await el.click({ timeout: 1500 });
+              await page.waitForTimeout(1200);
+            }
+          } catch {}
+        }
       }
     } catch {}
 
     await page.waitForTimeout(3000);
+
+    try {
+      const html = await page.content();
+      results.push(...extractLinksFromText(html, pageUrl, "pw-page-content"));
+    } catch {}
 
     await context.close();
     await browser.close();
@@ -446,7 +494,9 @@ async function probeUrl(url) {
       method: "HEAD",
       headers: {
         "User-Agent": USER_AGENT,
-        "Accept": "*/*"
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": url
       },
       redirect: "follow"
     });
@@ -468,7 +518,9 @@ async function probeUrl(url) {
         headers: {
           "User-Agent": USER_AGENT,
           "Accept": "*/*",
-          "Range": "bytes=0-32"
+          "Accept-Language": "en-US,en;q=0.9",
+          "Range": "bytes=0-32",
+          "Referer": url
         },
         redirect: "follow"
       });
@@ -532,25 +584,26 @@ app.post("/api/find-subtitles", async (req, res) => {
     let results = [];
     let debug = {
       htmlScan: false,
+      htmlReason: "",
       networkScan: false,
-      subtitleProbe: false,
-      networkReason: ""
+      networkReason: "",
+      subtitleProbe: false
     };
 
     if (mode === "subtitle" || (mode === "auto" && isDirectSubtitle)) {
       results = await scanSubtitleVariants(normalizedUrl);
       debug.subtitleProbe = true;
     } else {
-      const htmlResults = await htmlAndScriptScan(normalizedUrl);
-      results.push(...htmlResults);
-      debug.htmlScan = true;
+      const htmlScan = await htmlAndScriptScan(normalizedUrl);
+      results.push(...htmlScan.results);
+      debug.htmlScan = htmlScan.ok;
+      debug.htmlReason = htmlScan.reason || "";
 
       const net = await playwrightNetworkScan(normalizedUrl);
       results.push(...net.results);
       debug.networkScan = net.ok;
       debug.networkReason = net.reason || "";
 
-      // if scan found a direct subtitle url, also probe sibling languages
       const firstDirectSubtitle = results.find(r => subtitleLike(r.url));
       if (firstDirectSubtitle) {
         const siblingLangs = await scanSubtitleVariants(firstDirectSubtitle.url);
